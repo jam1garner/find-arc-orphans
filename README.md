@@ -1,2 +1,2 @@
-# arc-fuse
-A fuse wrapper for Smash Ultimate's ARC filetype
+# find-arc-orphans
+A tool for dumping ARC directory listings for directories that don't have them.
