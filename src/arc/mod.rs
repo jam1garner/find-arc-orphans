@@ -17,7 +17,9 @@ use memmap::Mmap;
 use packed_struct::prelude::*;
 use cached::{cached_key, SizedCache};
 
-static HASH_STRINGS: ArcStr = include_str!("hash40s.tsv");
+//static HASH_STRINGS: ArcStr = include_str!("hash40s.tsv");
+
+static HASH_STRINGS: ArcStr = "";
 
 //include!(concat!(env!("OUT_DIR"), "/hash40s.rs"));
 
