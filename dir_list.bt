@@ -1,0 +1,23 @@
+//------------------------------------------------
+//--- 010 Editor v10.0 Binary Template
+//
+//      File: 
+//   Authors: 
+//   Version: 
+//   Purpose: 
+//  Category: 
+// File Mask: 
+//  ID Bytes: 
+//   History: 
+//------------------------------------------------
+
+typedef uint64 u64;
+typedef uint64 Hash40;
+
+
+u64 dir_count<bgcolor=cPurple>;
+struct Entries {
+    u64 child_count<bgcolor=cRed>;
+    Hash40 dir_hash<bgcolor=cAqua>;
+    Hash40 child_hashes[child_count]<bgcolor=cGreen, optimize=false>;
+} entries[dir_count]<optimize=false>;
