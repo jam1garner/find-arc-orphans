@@ -12,7 +12,7 @@ mod structs;
 mod mem_file;
 use mem_file::{set_file, get_header, FilePtr64, FileSlice};
 use crc::crc32::checksum_ieee as crc32;
-use structs::*;
+pub use structs::*;
 use memmap::Mmap;
 use packed_struct::prelude::*;
 use cached::{cached_key, SizedCache};
@@ -78,7 +78,9 @@ pub struct Arc {
 }
 
 impl<'a> Arc {
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, io::Error> {
+    pub fn open_and_use<P: AsRef<Path>, F>(path: P, func: F) -> Result<(), io::Error>
+        where F: Fn(Arc, ArcInternal) -> (),
+    {
         let file = File::open(path.as_ref())?;
         let map = unsafe { Mmap::map(&file) }?;
 
@@ -240,7 +242,9 @@ impl<'a> Arc {
         // println!("Tree\n----");
         // arc.print_tree(0, 0);
 
-        Ok(arc)
+        func(arc, arc_internal);
+
+        Ok(())
     }
 
     pub fn get_name(&self, hash40: u64) -> Option<&'static str> {

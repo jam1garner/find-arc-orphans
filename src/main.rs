@@ -1,272 +1,64 @@
-extern crate fuse;
-extern crate zstd;
-extern crate memmap;
-extern crate env_logger;
-extern crate packed_struct;
 #[macro_use] extern crate packed_struct_codegen;
-
-use std::env;
-use std::ffi::OsStr;
-use std::path::Path;
-use time::Timespec;
-use libc::ENOENT;
-use fuse::{FileType, FileAttr, Filesystem, Request, ReplyData, ReplyEntry, ReplyAttr, ReplyDirectory};
-
 mod arc;
+use arc::*;
+use std::path::PathBuf;
+use structopt::StructOpt;
+use std::collections::HashMap;
+use binwrite::BinWrite;
+use std::fs::File;
 
-const TTL: Timespec = Timespec {
-    sec: 1,
-    nsec: 0,
-};
-
-const UNIX_EPOCH: Timespec = Timespec {
-    sec: 0,
-    nsec: 0,
-};
-
-
-struct ArcFS {
-    pub arc: arc::Arc,
+#[derive(StructOpt)]
+struct Args {
+    arc: PathBuf,
+    out_file: PathBuf
 }
 
-impl ArcFS {
-    pub fn open<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
-        Ok(Self { arc: arc::Arc::open(path)? })
-    }
-}
+fn use_arc(internal: ArcInternal, out_path: &PathBuf) {
+    let matches = 
+        internal.file_infos_v2
+            .iter()
+            .filter_map(|file_info: &FileInfo2|{
+                let path_index = file_info.hash_index;
+                let path: FileInformationPath = internal.file_info_paths[path_index as usize];
+                let parent = path.parent;
+                let full_path_hash = path.path.hash40();
 
-impl Filesystem for ArcFS {
-    fn init(&mut self, _req: &Request) -> Result<(), i32> {
-        println!("Arc successfully mounted");
-        #[cfg(feature="print")]
-        {
-            let inode: &u64 = &env::args_os().nth(3).unwrap().to_str().unwrap().parse().unwrap();
-            let name = self.arc.names.get(inode);
-            let stream_path = self.arc.stream_paths.get(inode);
-            let dir_children = self.arc.dir_children.get(inode);
-            let file = self.arc.files.get(inode);
-            let stem = self.arc.stems.get(inode);
-            dbg!(name, stream_path, stem, file, dir_children);
-            std::process::exit(0);
-        }
-        Ok(())
-    }
+                let parent_hash = parent.hash40();
+                if internal.dir_hash_to_index.binary_search_by_key(&parent_hash, |h| h.hash40()).is_err() {
+                    Some((parent_hash, full_path_hash))
+                } else {
+                    None
+                }
+            });
 
-    fn lookup(&mut self, req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        let parent = if parent == 1 { 0 } else { parent };
-        if let Some(a) = self.arc.get_name(parent) {
-            let file_path = String::from(a) +
-                if a.len() != 0 { "/" } else { "" } +
-                name.to_str().unwrap();
-            
-            let hash40 = arc::hash40(&file_path);
-            match self.arc.files.get(&hash40) {
-                Some(arc::ArcFileInfo::Directory) => {
-                    reply.entry(&TTL, &FileAttr {
-                            ino: hash40,
-                            size: 0,
-                            blocks: 0,
-                            atime: UNIX_EPOCH,
-                            mtime: UNIX_EPOCH,
-                            ctime: UNIX_EPOCH,
-                            crtime: UNIX_EPOCH,
-                            kind: FileType::Directory,
-                            perm: 0o755,
-                            nlink: 2,
-                            uid: req.uid(),
-                            gid: req.gid(),
-                            rdev: 0,
-                            flags: 0, 
-                    }, 0);
-                }
-                Some(arc::ArcFileInfo::Uncompressed { data, .. }) => {
-                    reply.entry(&TTL, &FileAttr {
-                        ino: hash40,
-                        size: data.len() as u64,
-                        blocks: 1,
-                        atime: UNIX_EPOCH,
-                        mtime: UNIX_EPOCH,
-                        ctime: UNIX_EPOCH,
-                        crtime: UNIX_EPOCH,
-                        kind: FileType::RegularFile,
-                        perm: 0o644,
-                        nlink: 1,
-                        uid: req.uid(),
-                        gid: req.gid(),
-                        rdev: 0,
-                        flags: 0, 
-                    }, 0);
-                }
-                Some(arc::ArcFileInfo::Compressed { decomp_size, .. }) => {
-                    reply.entry(&TTL, &FileAttr {
-                        ino: hash40,
-                        size: *decomp_size,
-                        blocks: 1,
-                        atime: UNIX_EPOCH,
-                        mtime: UNIX_EPOCH,
-                        ctime: UNIX_EPOCH,
-                        crtime: UNIX_EPOCH,
-                        kind: FileType::RegularFile,
-                        perm: 0o644,
-                        nlink: 1,
-                        uid: req.uid(),
-                        gid: req.gid(),
-                        rdev: 0,
-                        flags: 0, 
-                    }, 0);
-                }
-                None => {
-                    //dbg!("File does not exist", hash40);
-                    //dbg!(a, file_path, name);
-                    reply.error(ENOENT);
-                }
-                _ => {
-                    dbg!("Error: filetype match fail");
-                    reply.error(ENOENT);
-                }
+    let mut dirs = HashMap::<u64, Vec<u64>>::new();
+    for (parent_hash, full_path_hash) in matches {
+        match dirs.get_mut(&parent_hash) {
+            Some(dir) => {
+                dir.push(full_path_hash);
             }
-        } else {
-            dbg!("Error: name not found");
-            reply.error(ENOENT);
-        }
-    }
-
-    fn getattr(&mut self, req: &Request, ino: u64, reply: ReplyAttr) {
-        let ino = if ino == 1 { 0 } else { ino };
-        match self.arc.files.get(&ino) {
-            Some(arc::ArcFileInfo::Directory) => {
-                reply.attr(&TTL, &FileAttr {
-                        ino,
-                        size: 0,
-                        blocks: 0,
-                        atime: UNIX_EPOCH,
-                        mtime: UNIX_EPOCH,
-                        ctime: UNIX_EPOCH,
-                        crtime: UNIX_EPOCH,
-                        kind: FileType::Directory,
-                        perm: 0o755,
-                        nlink: 2,
-                        uid: req.uid(),
-                        gid: req.gid(),
-                        rdev: 0,
-                        flags: 0, 
-                });
-            }
-            Some(arc::ArcFileInfo::Uncompressed { data, .. }) => {
-                reply.attr(&TTL, &FileAttr {
-                    ino,
-                    size: data.len() as u64,
-                    blocks: 1,
-                    atime: UNIX_EPOCH,
-                    mtime: UNIX_EPOCH,
-                    ctime: UNIX_EPOCH,
-                    crtime: UNIX_EPOCH,
-                    kind: FileType::RegularFile,
-                    perm: 0o644,
-                    nlink: 1,
-                    uid: req.uid(),
-                    gid: req.gid(),
-                    rdev: 0,
-                    flags: 0, 
-                });
-            }
-            Some(arc::ArcFileInfo::Compressed { decomp_size, .. }) => {
-                reply.attr(&TTL, &FileAttr {
-                    ino,
-                    size: *decomp_size,
-                    blocks: 1,
-                    atime: UNIX_EPOCH,
-                    mtime: UNIX_EPOCH,
-                    ctime: UNIX_EPOCH,
-                    crtime: UNIX_EPOCH,
-                    kind: FileType::RegularFile,
-                    perm: 0o644,
-                    nlink: 1,
-                    uid: req.uid(),
-                    gid: req.gid(),
-                    rdev: 0,
-                    flags: 0, 
-                });
-            }
-            None => {
-                dbg!("File does not exist");
-                reply.error(ENOENT);
-            }
-            _ => {
-                dbg!("Error: filetype match fail");
-                reply.error(ENOENT);
+            None =>  {
+                dirs.insert(parent_hash, vec![ full_path_hash ]);
             }
         }
     }
 
-    fn read(&mut self, _req: &Request, ino: u64, _fh: u64, _offset: i64, _size: u32, reply: ReplyData) {
-        if let Some(data) = self.arc.get_file_data(ino) {
-            reply.data(&data.get_slice());
-        } else {
-            dbg!("Failed to get data");
-            reply.error(ENOENT);
-        }
-    }
-
-    fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
-        let ino = if ino == 1 { 0 } else { ino };
-        if let Some(children) = self.arc.dir_children.get(&ino) {
-            let mut entries = vec![
-                (1, FileType::Directory, "."),
-                (1, FileType::Directory, ".."),
-            ];
-            for child in children {
-                if *child == 0 {
-                    continue;
-                }
-                entries.push(
-                    (
-                        *child,
-                        match self.arc.files.get(&child) {
-                            Some(arc::ArcFileInfo::Directory) => {
-                                FileType::Directory
-                            }
-                            Some(arc::ArcFileInfo::Uncompressed { ..  }) |
-                            Some(arc::ArcFileInfo::Compressed { .. }) => {
-                                FileType::RegularFile
-                            }
-                            _ => {
-                                panic!("Improper type")
-                            }
-                        },
-                        self.arc.stems.get(&child).unwrap()
-                    )
+    (
+        dirs.len() as u64,
+        dirs.into_iter()
+            .map(|(parent_hash, children)|{
+                (
+                    children.len() as u64,
+                    parent_hash,
+                    children
                 )
-            }
-            
-            let to_skip = if offset == 0 { offset } else { offset + 1 } as usize;
-            for (i, entry) in entries.into_iter().enumerate().skip(to_skip) {
-                reply.add(entry.0, i as i64, entry.1, entry.2);
-            }
-            reply.ok();
-        } else {
-            println!("Not found");
-            reply.error(ENOENT);
-        }
-    }
-}
-
-fn get_args() -> Option<(std::ffi::OsString, std::ffi::OsString)> {
-    Some((
-        env::args_os().nth(1)?,
-        env::args_os().nth(2)?
-    ))
+            })
+            .collect::<Vec<_>>()
+    ).write(&mut File::create(out_path).unwrap()).unwrap();
 }
 
 fn main() {
-    env_logger::init();
-    if let Some((arc_path, mountpoint)) = get_args() {
-        let options = ["-o", "ro", "-o", "fsname=hello", "-o", "auto_unmount", "-o", "allow_other"]
-            .iter()
-            .map(|o| o.as_ref())
-            .collect::<Vec<&OsStr>>();
-        fuse::mount(ArcFS::open(arc_path).unwrap(), &mountpoint, &options).unwrap();
-    } else {
-        eprintln!("Missing arg [mountpoint]");
-    }
+    let args = Args::from_args();
+
+    Arc::open_and_use(&args.arc, |_, b| use_arc(b, &args.out_file)).unwrap();
 }
